@@ -2,3 +2,4 @@ ultralytics
 opencv-python
 PyYAML
 gpsd-py3
+python-pptx
