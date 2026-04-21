@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import logging
 import time
 from dataclasses import dataclass
@@ -20,6 +21,7 @@ class RuntimeStats:
     positive_frames: int = 0
     gps_fixes_used: int = 0
     potholes_saved: int = 0
+    events_saved: int = 0
     total_inference_ms: float = 0.0
 
     def report(self, elapsed_sec: float) -> str:
@@ -27,7 +29,8 @@ class RuntimeStats:
         fpm = (self.total_frames / elapsed_sec * 60.0) if elapsed_sec > 0 else 0.0
         return (
             f"frames={self.total_frames}, positives={self.positive_frames}, "
-            f"saved={self.potholes_saved}, gps_fixes={self.gps_fixes_used}, "
+            f"saved={self.potholes_saved}, events={self.events_saved}, "
+            f"gps_fixes={self.gps_fixes_used}, "
             f"avg_inference_ms={avg_ms:.1f}, throughput_fpm={fpm:.1f}"
         )
 
@@ -62,6 +65,12 @@ def run(config_path: str, max_iterations: int | None) -> None:
 
             if is_pothole:
                 stats.positive_frames += 1
+                db.insert_detection_event(
+                    detected_at=datetime.now(tz=timezone.utc).isoformat(),
+                    confidence=confidence,
+                    image_id_optional=image_path.name,
+                )
+                stats.events_saved += 1
                 if fix is not None:
                     stats.gps_fixes_used += 1
                     inserted = db.insert_pothole(
@@ -74,7 +83,7 @@ def run(config_path: str, max_iterations: int | None) -> None:
                     if inserted:
                         stats.potholes_saved += 1
                 else:
-                    logging.info("Pothole detected but no valid GPS fix; skipping DB insert.")
+                    notifier.notify(f"Pothole detected (confidence={confidence:.2f}).")
 
             if fix is not None:
                 nearest = db.nearest_distance_m(fix.latitude, fix.longitude)
