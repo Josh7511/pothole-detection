@@ -46,7 +46,7 @@ def main() -> None:
             "Potholes damage vehicles and create safety hazards.",
             "Dashcam road imagery enables visual pothole detection.",
             "Edge computing on Raspberry Pi supports low-latency, offline operation.",
-            "Goal: build a practical in-vehicle detector using camera + local alerts.",
+            "Goal: build a practical in-vehicle detector using camera + GPS + local alerts.",
         ],
     )
 
@@ -56,9 +56,9 @@ def main() -> None:
         "Problem Statement",
         [
             "Detect potholes in real road scenes with an onboard camera.",
-            "Store pothole detection events only when confidence is high.",
+            "Store pothole locations only when confidence is high.",
             "Ignore non-pothole frames to avoid unnecessary storage.",
-            "Notify immediately when potholes are detected in real time.",
+            "Warn drivers when approaching known potholes in real time.",
         ],
     )
 
@@ -69,8 +69,8 @@ def main() -> None:
         [
             "Capture one image every X seconds from Arducam.",
             "Run YOLOv26n-cls inference on Raspberry Pi 5.",
-            "If predicted pothole: log event details in SQLite.",
-            "Trigger immediate alert and keep GPS extension as future work.",
+            "If predicted pothole: read NEO-6M GPS fix and store in SQLite.",
+            "Continuously compute distance to nearest stored pothole for alerts.",
         ],
     )
 
@@ -79,27 +79,31 @@ def main() -> None:
         prs,
         "Implementation",
         [
-            "Hardware: Raspberry Pi 5 + Arducam 5MP camera.",
-            "Software: Python, Ultralytics YOLO, OpenCV, SQLite.",
-            "Services: capture, inference, database, notifier.",
-            "Main loop coordinates capture -> classify -> log event -> alert.",
+            "Hardware: Raspberry Pi 5 + Arducam 5MP + u-blox NEO-6M (UART).",
+            "Software: Python, Ultralytics YOLO, OpenCV, gpsd-py3, SQLite.",
+            "Services: capture, inference, GPS, database, proximity, notifier.",
+            "Main loop coordinates capture -> classify -> geotag -> dedup -> alert.",
         ],
     )
 
     # 6) Code
     code_text = """# main.py (runtime loop excerpt)
 image_path = capture.capture()
+fix = gps.get_fix()
 prediction = infer.predict(image_path)
 
-if prediction["is_pothole"]:
-    db.insert_detection_event(
-        detected_at=datetime.now(tz=timezone.utc).isoformat(),
+if prediction["is_pothole"] and fix is not None:
+    db.insert_pothole(
+        latitude=fix.latitude,
+        longitude=fix.longitude,
+        detected_at=fix.timestamp,
         confidence=float(prediction["confidence"]),
         image_id_optional=image_path.name,
     )
-    notifier.notify(
-        f"Pothole detected (confidence={float(prediction['confidence']):.2f})"
-    )
+
+nearest = db.nearest_distance_m(fix.latitude, fix.longitude) if fix else None
+if proximity.should_alert(nearest):
+    notifier.notify(f"Pothole ahead in {nearest:.1f} meters.")
 """
     add_code_slide(prs, "Code", code_text)
 
@@ -108,10 +112,10 @@ if prediction["is_pothole"]:
         prs,
         "Evaluation",
         [
-            "Measured metrics: avg inference latency, frames/min, positive events saved.",
+            "Measured metrics: avg inference latency, frames/min, GPS fix usage, potholes saved.",
             "Log parser script extracts runtime summary from detector logs.",
-            "Detector remained stable in repeated runs on Raspberry Pi 5.",
-            "Next step: add GPS geotagging and route-based precision/recall.",
+            "Dedup distance reduces repeated inserts for the same pothole pass.",
+            "Next step: collect route-based precision/recall from field trials.",
         ],
     )
 
@@ -122,7 +126,7 @@ if prediction["is_pothole"]:
         [
             "Demo plan: run detector in moving vehicle with live console output.",
             "Show: image capture cadence, inference labels/confidence, and DB inserts.",
-            "Show: immediate alerts triggering for detected potholes.",
+            "Show: proximity alerts triggering near known pothole coordinates.",
             "Insert your final demo link(s) here before presentation.",
         ],
     )
@@ -134,8 +138,8 @@ if prediction["is_pothole"]:
         [
             "Ultralytics YOLO documentation: https://docs.ultralytics.com",
             "Raspberry Pi documentation: https://www.raspberrypi.com/documentation/",
-            "python-pptx project: https://python-pptx.readthedocs.io",
-            "Future extension: u-blox NEO-6M integration guides.",
+            "gpsd project: https://gpsd.io/",
+            "u-blox NEO-6M product documentation and integration guides.",
         ],
     )
 

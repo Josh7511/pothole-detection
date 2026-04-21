@@ -26,16 +26,6 @@ class DatabaseService:
             )
             """
         )
-        self._conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS detection_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                detected_at TEXT NOT NULL,
-                confidence REAL NOT NULL,
-                image_id_optional TEXT
-            )
-            """
-        )
         self._conn.commit()
 
     def _is_duplicate(self, latitude: float, longitude: float) -> bool:
@@ -80,21 +70,6 @@ class DatabaseService:
             for row in rows
         ]
         return min(distances)
-
-    def insert_detection_event(
-        self,
-        detected_at: str,
-        confidence: float,
-        image_id_optional: str | None = None,
-    ) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO detection_events(detected_at, confidence, image_id_optional)
-            VALUES (?, ?, ?)
-            """,
-            (detected_at, confidence, image_id_optional),
-        )
-        self._conn.commit()
 
     def close(self) -> None:
         self._conn.close()

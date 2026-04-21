@@ -10,7 +10,7 @@ inference:
   pothole_class_name: "pothole"
   confidence_threshold: 0.5
 gps:
-  enabled: false
+  enabled: true
   min_fix_mode: 2
   min_satellites: 4
 database:
