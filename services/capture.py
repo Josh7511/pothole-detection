@@ -93,43 +93,62 @@ def _find_rpicam_still() -> str | None:
     return shutil.which("rpicam-still") or shutil.which("libcamera-still")
 
 
-def _probe_rpicam_still(settings: CaptureSettings, temp_dir: Path) -> str | None:
-    """Return executable path if rpicam-still can write a decodable JPEG (same stack as rpicam-hello)."""
+def _probe_rpicam_still(
+    settings: CaptureSettings, temp_dir: Path
+) -> tuple[str | None, str]:
+    """Return (exe, dim_style). Default sensor mode first — forcing WxH often fails on OV5647."""
     exe = _find_rpicam_still()
     if not exe:
-        return None
+        return None, "minimal"
     probe_path = temp_dir / "_probe_rpicam_still.jpg"
     w, h = settings.image_width, settings.image_height
-    cmd = [
-        exe,
-        "-t",
-        "200",
-        "--nopreview",
-        "-o",
-        str(probe_path),
-        "--width",
-        str(w),
-        "--height",
-        str(h),
+    attempts: list[tuple[str, list[str]]] = [
+        (
+            "minimal",
+            [exe, "-t", "200", "--nopreview", "-o", str(probe_path)],
+        ),
+        (
+            "explicit_wh",
+            [
+                exe,
+                "-t",
+                "200",
+                "--nopreview",
+                "-o",
+                str(probe_path),
+                "--width",
+                str(w),
+                "--height",
+                str(h),
+            ],
+        ),
     ]
-    try:
-        subprocess.run(cmd, check=True, timeout=45, capture_output=True, text=True)
-    except (
-        subprocess.CalledProcessError,
-        FileNotFoundError,
-        subprocess.TimeoutExpired,
-    ):
-        return None
-    if not probe_path.exists() or probe_path.stat().st_size < 200:
-        return None
-    img = cv2.imread(str(probe_path))
-    try:
-        probe_path.unlink()
-    except OSError:
-        pass
-    if img is None or getattr(img, "size", 0) == 0:
-        return None
-    return exe
+    for dim_style, cmd in attempts:
+        if probe_path.exists():
+            try:
+                probe_path.unlink()
+            except OSError:
+                pass
+        try:
+            subprocess.run(cmd, check=True, timeout=45, capture_output=True, text=True)
+        except (
+            subprocess.CalledProcessError,
+            FileNotFoundError,
+            subprocess.TimeoutExpired,
+        ):
+            continue
+        if not probe_path.exists() or probe_path.stat().st_size < 200:
+            continue
+        img = cv2.imread(str(probe_path))
+        try:
+            if probe_path.exists():
+                probe_path.unlink()
+        except OSError:
+            pass
+        if img is None or getattr(img, "size", 0) == 0:
+            continue
+        return exe, dim_style
+    return None, "minimal"
 
 
 def _probe_first_nonempty_frame(cap: cv2.VideoCapture, attempts: int = 25) -> bool:
@@ -152,6 +171,7 @@ class CaptureService:
         self._temp_dir.mkdir(parents=True, exist_ok=True)
         self._rpicam_mode = False
         self._rpicam_exe: str | None = None
+        self._rpicam_dim_style: str = "minimal"
         # #region agent log
         index_order = _camera_index_candidates(settings.camera_index)
         _agent_debug_log(
@@ -216,7 +236,9 @@ class CaptureService:
             # endregion
 
         if self._camera is None:
-            self._rpicam_exe = _probe_rpicam_still(settings, self._temp_dir)
+            self._rpicam_exe, self._rpicam_dim_style = _probe_rpicam_still(
+                settings, self._temp_dir
+            )
             if self._rpicam_exe:
                 self._rpicam_mode = True
                 # #region agent log
@@ -227,6 +249,7 @@ class CaptureService:
                     {
                         "executable": self._rpicam_exe,
                         "reason": "opencv_failed_all_indices",
+                        "dim_style": self._rpicam_dim_style,
                     },
                 )
                 _agent_debug_log(
@@ -331,18 +354,9 @@ class CaptureService:
         stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         image_path = self._temp_dir / f"{stamp}.jpg"
         w, h = self._settings.image_width, self._settings.image_height
-        cmd = [
-            self._rpicam_exe,
-            "-t",
-            "200",
-            "--nopreview",
-            "-o",
-            str(image_path),
-            "--width",
-            str(w),
-            "--height",
-            str(h),
-        ]
+        cmd = [self._rpicam_exe, "-t", "200", "--nopreview", "-o", str(image_path)]
+        if self._rpicam_dim_style == "explicit_wh":
+            cmd.extend(["--width", str(w), "--height", str(h)])
         subprocess.run(cmd, check=True, timeout=45, capture_output=True, text=True)
         img = cv2.imread(str(image_path))
         if img is None or getattr(img, "size", 0) == 0:
