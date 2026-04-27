@@ -2,7 +2,7 @@
 # thresholds for weak indoor or window-sill reception. For camera-only (no gpsd), set
 # gps.enabled to false.
 
-model_path: "models/yolov26n-cls.pt"
+model_path: "models/best.pt"
 capture:
   camera_index: 0
   interval_sec: 2.0

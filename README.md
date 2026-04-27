@@ -8,7 +8,7 @@ Edge pothole detection pipeline for Raspberry Pi 5 using Arducam + YOLO classifi
    - `source .venv/bin/activate`
    - `pip install -r requirements.txt`
 2. Ensure:
-   - YOLO model exists at `models/yolov26n-cls.pt`
+   - YOLO weights exist at `models/best.pt` (or set `model_path` in your config)
    - Camera is connected and readable
    - `gpsd` is running and attached to NEO-6M UART stream
 3. Start detector:
