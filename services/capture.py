@@ -48,19 +48,33 @@ def _iter_capture_backends(camera_index: int):
 
 
 def _camera_index_candidates(preferred: int) -> list[int]:
-    """Prefer config index, then every /dev/videoN number (Pi often exposes many nodes)."""
+    """Order indices for Pi CSI + libcamera layout.
+
+    Typical Pi 5 `v4l2-ctl --list-devices`: rp1-cfe (CSI) exposes /dev/video0–7;
+    rpi-hevc-dec uses e.g. video19; pispbe uses video20+. OpenCV should usually
+    bind to the CSI node (0–7), not the decoder or ISP plumbing.
+    """
     discovered: list[int] = []
     for p in Path("/dev").glob("video*"):
         tail = p.name.removeprefix("video")
         if tail.isdigit():
             discovered.append(int(tail))
-    discovered = sorted(set(discovered))
+    discovered_set = sorted(set(discovered))
     seen: set[int] = set()
     ordered: list[int] = []
-    for n in [preferred, *discovered, *range(8)]:
+
+    def push(n: int) -> None:
         if n >= 0 and n not in seen:
             seen.add(n)
             ordered.append(n)
+
+    push(preferred)
+    for n in range(8):
+        push(n)
+    for n in discovered_set:
+        push(n)
+    for n in range(8, 24):
+        push(n)
     return ordered
 
 
