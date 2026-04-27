@@ -90,6 +90,30 @@ def _camera_index_candidates(preferred: int) -> list[int]:
     return ordered
 
 
+def _skip_opencv_camera() -> bool:
+    """Set POTHOLE_SKIP_OPENCV_CAMERA=1 on Pi CSI when OpenCV probing leaves libcamera busy."""
+    return os.environ.get("POTHOLE_SKIP_OPENCV_CAMERA", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _rpicam_stderr_retryable(stderr: str) -> bool:
+    s = stderr.lower()
+    return any(
+        needle in s
+        for needle in (
+            "device or resource busy",
+            "resource busy",
+            "could not allocate",
+            "failed to allocate",
+            "unable to acquire",
+            "camera is in use",
+        )
+    )
+
+
 def _find_rpicam_still() -> str | None:
     for cand in (
         shutil.which("rpicam-still"),
@@ -102,14 +126,26 @@ def _find_rpicam_still() -> str | None:
     return None
 
 
+def _probe_jpeg_readable(path: Path) -> bool:
+    if not path.exists():
+        return False
+    sz = path.stat().st_size
+    if sz < 500:
+        return False
+    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    ok = img is not None and getattr(img, "size", 0) > 0
+    if ok:
+        return True
+    return sz >= 5000
+
+
 def _probe_rpicam_still(
     settings: CaptureSettings, _temp_dir: Path
 ) -> tuple[str | None, str]:
-    """Return (exe, dim_style). Probe under /tmp (same as manual tests). Minimal WxH first."""
+    """Return (exe, dim_style). Probe under /tmp; retry when libcamera reports busy."""
     exe = _find_rpicam_still()
     if not exe:
         return None, "minimal"
-    # Fixed path under /tmp — avoids odd perms on custom temp_dir; matches typical rpicam tests.
     probe_path = Path("/tmp/_pothole_probe_rpicam_still.jpg")
     w, h = settings.image_width, settings.image_height
     attempts: list[tuple[str, list[str]]] = [
@@ -133,69 +169,83 @@ def _probe_rpicam_still(
             ],
         ),
     ]
+    max_retries = 8
     for dim_style, cmd in attempts:
-        if probe_path.exists():
+        for retry in range(max_retries):
+            if probe_path.exists():
+                try:
+                    probe_path.unlink()
+                except OSError:
+                    pass
+            proc: subprocess.CompletedProcess[str] | None = None
             try:
-                probe_path.unlink()
-            except OSError:
-                pass
-        proc: subprocess.CompletedProcess[str] | None = None
-        try:
-            proc = subprocess.run(
-                cmd,
-                check=False,
-                timeout=45,
-                capture_output=True,
-                text=True,
-                stdin=subprocess.DEVNULL,
-                env=os.environ,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            # #region agent log
-            _agent_debug_log(
-                "H3",
-                "capture.py:_probe_rpicam_still:run_failed",
-                "rpicam subprocess exception",
-                {"dim_style": dim_style, "error": repr(exc)},
-            )
-            # endregion
-            continue
-        if proc is None or proc.returncode != 0:
-            # #region agent log
-            _agent_debug_log(
-                "H3",
-                "capture.py:_probe_rpicam_still:nonzero",
-                "rpicam-still returned error",
-                {
-                    "dim_style": dim_style,
-                    "returncode": getattr(proc, "returncode", None),
-                    "stderr_tail": (proc.stderr or "")[-800:] if proc else "",
-                },
-            )
-            # endregion
-            continue
-        if not probe_path.exists():
-            continue
-        sz = probe_path.stat().st_size
-        if sz < 500:
-            continue
-        img = cv2.imread(str(probe_path), cv2.IMREAD_COLOR)
-        ok_decode = img is not None and getattr(img, "size", 0) > 0
-        if not ok_decode and sz < 5000:
-            # #region agent log
-            _agent_debug_log(
-                "H3",
-                "capture.py:_probe_rpicam_still:imread_failed",
-                "JPEG exists but OpenCV imread failed",
-                {"dim_style": dim_style, "bytes": sz},
-            )
-            # endregion
-            continue
-        try:
-            probe_path.unlink()
-        except OSError:
-            pass
-        return exe, dim_style
+                proc = subprocess.run(
+                    cmd,
+                    check=False,
+                    timeout=45,
+                    capture_output=True,
+                    text=True,
+                    stdin=subprocess.DEVNULL,
+                    env=os.environ,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                # #region agent log
+                _agent_debug_log(
+                    "H3",
+                    "capture.py:_probe_rpicam_still:run_failed",
+                    "rpicam subprocess exception",
+                    {"dim_style": dim_style, "retry": retry, "error": repr(exc)},
+                )
+                # endregion
+                break
+            stderr = (proc.stderr or "") if proc else ""
+            if proc and proc.returncode == 0 and _probe_jpeg_readable(probe_path):
+                try:
+                    probe_path.unlink()
+                except OSError:
+                    pass
+                return exe, dim_style
+            if proc and proc.returncode != 0:
+                # #region agent log
+                _agent_debug_log(
+                    "H3",
+                    "capture.py:_probe_rpicam_still:nonzero",
+                    "rpicam-still returned error",
+                    {
+                        "dim_style": dim_style,
+                        "retry": retry,
+                        "returncode": proc.returncode,
+                        "stderr_tail": stderr[-800:],
+                    },
+                )
+                # endregion
+            if (
+                retry < max_retries - 1
+                and proc is not None
+                and _rpicam_stderr_retryable(stderr)
+            ):
+                delay = min(12.0, 2.0 + retry * 1.5)
+                # #region agent log
+                _agent_debug_log(
+                    "H3",
+                    "capture.py:_probe_rpicam_still:busy_retry",
+                    "Camera busy; waiting before retry",
+                    {"dim_style": dim_style, "retry": retry, "sleep_sec": delay},
+                )
+                # endregion
+                time.sleep(delay)
+                continue
+            if proc and proc.returncode == 0:
+                sz = probe_path.stat().st_size if probe_path.exists() else 0
+                # #region agent log
+                _agent_debug_log(
+                    "H3",
+                    "capture.py:_probe_rpicam_still:imread_failed",
+                    "rpicam exited 0 but JPEG not readable",
+                    {"dim_style": dim_style, "bytes": sz},
+                )
+                # endregion
+            break
     return None, "minimal"
 
 
@@ -238,54 +288,67 @@ class CaptureService:
                 "opencv_has_CAP_LIBCAMERA": hasattr(cv2, "CAP_LIBCAMERA"),
                 "opencv_has_CAP_V4L2": hasattr(cv2, "CAP_V4L2"),
                 "opencv_version": getattr(cv2, "__version__", "unknown"),
+                "skip_opencv_camera": _skip_opencv_camera(),
             },
         )
         # endregion
 
-        res_chain: list[tuple[int, int]] = [
-            (settings.image_width, settings.image_height),
-        ]
-        if res_chain[0] != (640, 480):
-            res_chain.append((640, 480))
-
         self._camera: cv2.VideoCapture | None = None
         chosen: dict[str, str | int | float] = {}
-        for idx in index_order:
-            for attempt_label, factory in _iter_capture_attempts(idx):
-                for rw, rh in res_chain:
-                    cap = factory()
-                    if not cap.isOpened():
+
+        if not _skip_opencv_camera():
+            res_chain: list[tuple[int, int]] = [
+                (settings.image_width, settings.image_height),
+            ]
+            if res_chain[0] != (640, 480):
+                res_chain.append((640, 480))
+
+            for idx in index_order:
+                for attempt_label, factory in _iter_capture_attempts(idx):
+                    for rw, rh in res_chain:
+                        cap = factory()
+                        if not cap.isOpened():
+                            cap.release()
+                            continue
+                        cap.set(cv2.CAP_PROP_FRAME_WIDTH, rw)
+                        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, rh)
+                        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                        if _probe_first_nonempty_frame(cap):
+                            self._camera = cap
+                            chosen = {
+                                "device_index": idx,
+                                "attempt_label": attempt_label,
+                                "negotiated_w": rw,
+                                "negotiated_h": rh,
+                            }
+                            break
                         cap.release()
-                        continue
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, rw)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, rh)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    if _probe_first_nonempty_frame(cap):
-                        self._camera = cap
-                        chosen = {
-                            "device_index": idx,
-                            "attempt_label": attempt_label,
-                            "negotiated_w": rw,
-                            "negotiated_h": rh,
-                        }
+                    if self._camera is not None:
                         break
-                    cap.release()
                 if self._camera is not None:
                     break
-            if self._camera is not None:
-                break
+                # #region agent log
+                _agent_debug_log(
+                    "H3",
+                    "capture.py:CaptureService.__init__:index_failed",
+                    "No frame on this device index",
+                    {"tried_index": idx},
+                )
+                # endregion
+        else:
             # #region agent log
             _agent_debug_log(
                 "H3",
-                "capture.py:CaptureService.__init__:index_failed",
-                "No frame on this device index",
-                {"tried_index": idx},
+                "capture.py:CaptureService.__init__:skip_opencv",
+                "Skipping OpenCV (POTHOLE_SKIP_OPENCV_CAMERA); using rpicam-still only",
+                {},
             )
             # endregion
 
         if self._camera is None:
-            # OpenCV probing can leave the CSI stack busy; brief pause before libcamera CLI.
-            time.sleep(1.0)
+            # OpenCV probing can leave the CSI stack busy; wait before libcamera CLI.
+            if not _skip_opencv_camera():
+                time.sleep(3.0)
             self._rpicam_exe, self._rpicam_dim_style = _probe_rpicam_still(
                 settings, self._temp_dir
             )
@@ -310,12 +373,20 @@ class CaptureService:
                 )
                 # endregion
             else:
+                hint = (
+                    "Set POTHOLE_SKIP_OPENCV_CAMERA=1 to skip V4L2 probing (often leaves camera busy on Pi 5). "
+                    "Close other camera apps and retry."
+                )
                 raise RuntimeError(
-                    "OpenCV could not capture frames (tried libcamera+V4L2 paths and indices "
-                    f"{index_order}), and rpicam-still probe failed or is not installed. "
-                    "If `rpicam-hello` works, install `rpicam-apps` (`rpicam-still` on PATH) "
-                    "or an OpenCV build with libcamera support; confirm no other process "
-                    "holds the camera."
+                    "OpenCV could not capture frames "
+                    + (
+                        f"(skipped; see env) "
+                        if _skip_opencv_camera()
+                        else f"(tried libcamera+V4L2 paths and indices {index_order}) "
+                    )
+                    + "and rpicam-still probe failed after retries. "
+                    + hint
+                    + " If `rpicam-hello` works, ensure `rpicam-still` is on PATH."
                 )
 
         if self._camera is not None:
@@ -407,7 +478,29 @@ class CaptureService:
         cmd = [self._rpicam_exe, "-t", "200", "--nopreview", "-o", str(image_path)]
         if self._rpicam_dim_style == "explicit_wh":
             cmd.extend(["--width", str(w), "--height", str(h)])
-        subprocess.run(cmd, check=True, timeout=45, capture_output=True, text=True)
+        max_retries = 8
+        proc: subprocess.CompletedProcess[str] | None = None
+        for retry in range(max_retries):
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                timeout=45,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                env=os.environ,
+            )
+            stderr = proc.stderr or ""
+            if proc.returncode == 0:
+                break
+            if retry < max_retries - 1 and _rpicam_stderr_retryable(stderr):
+                time.sleep(min(12.0, 2.0 + retry * 1.5))
+                continue
+            raise RuntimeError(
+                f"rpicam-still failed (code {proc.returncode}): {stderr[-1200:]!s}"
+            )
+        if proc is None or proc.returncode != 0:
+            raise RuntimeError("rpicam-still failed with no capture path.")
         img = cv2.imread(str(image_path))
         if img is None or getattr(img, "size", 0) == 0:
             # #region agent log
