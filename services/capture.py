@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -21,10 +22,21 @@ class CaptureService:
                 f"Could not open camera index {settings.camera_index}. "
                 "Verify Arducam and camera permissions."
             )
+        # Many USB/CSI modules on Pi return no frame on the first read() after open.
+        for _ in range(15):
+            ok, _ = self._camera.read()
+            if ok:
+                break
+            time.sleep(0.05)
 
     def capture(self) -> Path:
-        ok, frame = self._camera.read()
-        if not ok:
+        frame = None
+        for _ in range(30):
+            ok, frame = self._camera.read()
+            if ok and frame is not None and getattr(frame, "size", 0) > 0:
+                break
+            time.sleep(0.05)
+        else:
             raise RuntimeError("Camera read failed.")
 
         stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
