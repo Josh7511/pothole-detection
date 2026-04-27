@@ -17,7 +17,7 @@ def _agent_debug_log(
     root = Path(__file__).resolve().parent.parent
     payload = {
         "sessionId": "caef2d",
-        "runId": "pre-fix",
+        "runId": "post-fix-verify",
         "hypothesisId": hypothesis_id,
         "location": location,
         "message": message,
@@ -37,6 +37,27 @@ def _agent_debug_log(
 
 
 # endregion
+
+
+def _iter_capture_backends(camera_index: int):
+    yield "default", lambda: cv2.VideoCapture(camera_index)
+    if hasattr(cv2, "CAP_V4L2"):
+        yield "CAP_V4L2", lambda: cv2.VideoCapture(camera_index, cv2.CAP_V4L2)
+    if hasattr(cv2, "CAP_LIBCAMERA"):
+        yield "CAP_LIBCAMERA", lambda: cv2.VideoCapture(camera_index, cv2.CAP_LIBCAMERA)
+
+
+def _probe_first_nonempty_frame(cap: cv2.VideoCapture, attempts: int = 25) -> bool:
+    for _ in range(attempts):
+        ok, fr = cap.read()
+        if ok and fr is not None and getattr(fr, "size", 0) > 0:
+            return True
+        if cap.grab():
+            ok_r, fr2 = cap.retrieve()
+            if ok_r and fr2 is not None and getattr(fr2, "size", 0) > 0:
+                return True
+        time.sleep(0.04)
+    return False
 
 
 class CaptureService:
@@ -59,14 +80,44 @@ class CaptureService:
             },
         )
         # endregion
-        self._camera = cv2.VideoCapture(settings.camera_index)
-        self._camera.set(cv2.CAP_PROP_FRAME_WIDTH, settings.image_width)
-        self._camera.set(cv2.CAP_PROP_FRAME_HEIGHT, settings.image_height)
-        if not self._camera.isOpened():
+
+        idx = settings.camera_index
+        res_chain: list[tuple[int, int]] = [
+            (settings.image_width, settings.image_height),
+        ]
+        if res_chain[0] != (640, 480):
+            res_chain.append((640, 480))
+
+        self._camera: cv2.VideoCapture | None = None
+        chosen: dict[str, str | int | float] = {}
+        for backend_label, factory in _iter_capture_backends(idx):
+            for rw, rh in res_chain:
+                cap = factory()
+                if not cap.isOpened():
+                    cap.release()
+                    continue
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, rw)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, rh)
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                if _probe_first_nonempty_frame(cap):
+                    self._camera = cap
+                    chosen = {
+                        "backend_label": backend_label,
+                        "negotiated_w": rw,
+                        "negotiated_h": rh,
+                    }
+                    break
+                cap.release()
+            if self._camera is not None:
+                break
+
+        if self._camera is None:
             raise RuntimeError(
-                f"Could not open camera index {settings.camera_index}. "
-                "Verify Arducam and camera permissions."
+                f"No camera backend produced frames for index {idx}. "
+                "Try config.capture.camera_index=1, verify `libcamera-hello --list-cameras`, "
+                "and ensure no other process uses the camera."
             )
+
         # #region agent log
         try:
             backend_name = self._camera.getBackendName()
@@ -83,25 +134,20 @@ class CaptureService:
                 "is_opened": self._camera.isOpened(),
                 "actual_w": actual_w,
                 "actual_h": actual_h,
+                **chosen,
             },
         )
-        # endregion
-        # Many USB/CSI modules on Pi return no frame on the first read() after open.
-        warmup_first_ok_nonempty: bool | None = None
-        for _ in range(15):
-            ok, fr = self._camera.read()
-            if ok:
-                warmup_first_ok_nonempty = bool(
-                    fr is not None and getattr(fr, "size", 0) > 0
-                )
-                break
-            time.sleep(0.05)
-        # #region agent log
+        _agent_debug_log(
+            "FIX",
+            "capture.py:CaptureService.__init__:backend_selected",
+            "Probe succeeded",
+            dict(chosen),
+        )
         _agent_debug_log(
             "H4",
             "capture.py:CaptureService.__init__:warmup_done",
-            "Warmup summary (original break on ok only)",
-            {"warmup_first_ok_nonempty": warmup_first_ok_nonempty},
+            "Warmup skipped; probe already validated nonempty frames",
+            {"warmup_first_ok_nonempty": True},
         )
         # endregion
 
