@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -90,17 +91,26 @@ def _camera_index_candidates(preferred: int) -> list[int]:
 
 
 def _find_rpicam_still() -> str | None:
-    return shutil.which("rpicam-still") or shutil.which("libcamera-still")
+    for cand in (
+        shutil.which("rpicam-still"),
+        shutil.which("libcamera-still"),
+        "/usr/bin/rpicam-still",
+        "/usr/bin/libcamera-still",
+    ):
+        if cand and Path(cand).is_file() and os.access(cand, os.X_OK):
+            return cand
+    return None
 
 
 def _probe_rpicam_still(
-    settings: CaptureSettings, temp_dir: Path
+    settings: CaptureSettings, _temp_dir: Path
 ) -> tuple[str | None, str]:
-    """Return (exe, dim_style). Default sensor mode first — forcing WxH often fails on OV5647."""
+    """Return (exe, dim_style). Probe under /tmp (same as manual tests). Minimal WxH first."""
     exe = _find_rpicam_still()
     if not exe:
         return None, "minimal"
-    probe_path = temp_dir / "_probe_rpicam_still.jpg"
+    # Fixed path under /tmp — avoids odd perms on custom temp_dir; matches typical rpicam tests.
+    probe_path = Path("/tmp/_pothole_probe_rpicam_still.jpg")
     w, h = settings.image_width, settings.image_height
     attempts: list[tuple[str, list[str]]] = [
         (
@@ -129,24 +139,62 @@ def _probe_rpicam_still(
                 probe_path.unlink()
             except OSError:
                 pass
+        proc: subprocess.CompletedProcess[str] | None = None
         try:
-            subprocess.run(cmd, check=True, timeout=45, capture_output=True, text=True)
-        except (
-            subprocess.CalledProcessError,
-            FileNotFoundError,
-            subprocess.TimeoutExpired,
-        ):
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                timeout=45,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                env=os.environ,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            # #region agent log
+            _agent_debug_log(
+                "H3",
+                "capture.py:_probe_rpicam_still:run_failed",
+                "rpicam subprocess exception",
+                {"dim_style": dim_style, "error": repr(exc)},
+            )
+            # endregion
             continue
-        if not probe_path.exists() or probe_path.stat().st_size < 200:
+        if proc is None or proc.returncode != 0:
+            # #region agent log
+            _agent_debug_log(
+                "H3",
+                "capture.py:_probe_rpicam_still:nonzero",
+                "rpicam-still returned error",
+                {
+                    "dim_style": dim_style,
+                    "returncode": getattr(proc, "returncode", None),
+                    "stderr_tail": (proc.stderr or "")[-800:] if proc else "",
+                },
+            )
+            # endregion
             continue
-        img = cv2.imread(str(probe_path))
+        if not probe_path.exists():
+            continue
+        sz = probe_path.stat().st_size
+        if sz < 500:
+            continue
+        img = cv2.imread(str(probe_path), cv2.IMREAD_COLOR)
+        ok_decode = img is not None and getattr(img, "size", 0) > 0
+        if not ok_decode and sz < 5000:
+            # #region agent log
+            _agent_debug_log(
+                "H3",
+                "capture.py:_probe_rpicam_still:imread_failed",
+                "JPEG exists but OpenCV imread failed",
+                {"dim_style": dim_style, "bytes": sz},
+            )
+            # endregion
+            continue
         try:
-            if probe_path.exists():
-                probe_path.unlink()
+            probe_path.unlink()
         except OSError:
             pass
-        if img is None or getattr(img, "size", 0) == 0:
-            continue
         return exe, dim_style
     return None, "minimal"
 
@@ -236,6 +284,8 @@ class CaptureService:
             # endregion
 
         if self._camera is None:
+            # OpenCV probing can leave the CSI stack busy; brief pause before libcamera CLI.
+            time.sleep(1.0)
             self._rpicam_exe, self._rpicam_dim_style = _probe_rpicam_still(
                 settings, self._temp_dir
             )
