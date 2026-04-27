@@ -1,6 +1,6 @@
-# Bench / indoor testing: keeps capture JPEGs, uses a throwaway DB, slightly relaxed GPS
-# thresholds for weak indoor or window-sill reception. For camera-only (no gpsd), set
-# gps.enabled to false.
+# Bench / indoor testing: keeps capture JPEGs, uses a throwaway DB. Mock GPS gives a
+# stable fix without gpsd/sky view (change mock coords if you care about map position).
+# For real indoor GNSS: set use_mock_fix: false, run gpsd, relax min_satellites if needed.
 
 model_path: "models/best.pt"
 capture:
@@ -17,6 +17,9 @@ gps:
   enabled: true
   min_fix_mode: 2
   min_satellites: 3
+  use_mock_fix: true
+  mock_latitude: 37.4219
+  mock_longitude: -122.084
 database:
   path: "data/indoor_test.db"
   dedup_distance_m: 10.0

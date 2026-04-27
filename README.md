@@ -21,13 +21,13 @@ Edge pothole detection pipeline for Raspberry Pi 5 using Arducam + YOLO classifi
 Use `config.indoor.yaml` on a desk before mounting in a vehicle:
 - Keeps JPEGs under `capture.temp_dir` so you can verify the camera.
 - Writes detections to `data/indoor_test.db` instead of your main database.
-- Uses `gps.min_satellites: 3` for marginal indoor / window reception (still expect slow or no lock deep indoors).
+- **`gps.use_mock_fix: true`** returns a synthetic fix (`mock_latitude` / `mock_longitude`) so DB inserts work without `gpsd` or sky view. Set **`use_mock_fix: false`**, run **`gpsd`**, and optionally lower **`min_satellites`** (e.g. `3`) for real weak-indoor GNSS.
 
 ```bash
 python main.py --config config.indoor.yaml --max-iterations 40 --log-level INFO
 ```
 
-If `gpsd` is not running, the process still runs (camera + inference); you will see `gps_fix=False` until the daemon is up. To skip GPS entirely for a camera-only check, set `gps.enabled` to `false` in the config you use.
+For production / vehicle runs, use **`config.yaml`** with **`use_mock_fix: false`** (or omit mock keys). For camera-only, set **`gps.enabled`** to **`false`**.
 
 On Raspberry Pi, the camera path **skips OpenCV’s V4L2 scan by default** and uses **`rpicam-still` with `--zsl`** so the ISP stack is not left busy (`/dev/video*` EBUSY). To force the old behavior (try OpenCV indices first), set **`POTHOLE_TRY_OPENCV_CAMERA=1`**. To force skipping OpenCV on non-Pi machines, use **`POTHOLE_SKIP_OPENCV_CAMERA=1`**.
 

@@ -28,6 +28,10 @@ class GpsSettings:
     enabled: bool
     min_fix_mode: int
     min_satellites: int
+    # Bench / deep indoor: return a synthetic fix without gpsd or sky view.
+    use_mock_fix: bool = False
+    mock_latitude: float = 37.4219
+    mock_longitude: float = -122.084
 
 
 @dataclass

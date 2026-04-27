@@ -13,6 +13,7 @@ gps:
   enabled: true
   min_fix_mode: 2
   min_satellites: 4
+  use_mock_fix: false
 database:
   path: "data/potholes.db"
   dedup_distance_m: 10.0
