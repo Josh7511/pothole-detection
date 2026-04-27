@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -87,6 +89,49 @@ def _camera_index_candidates(preferred: int) -> list[int]:
     return ordered
 
 
+def _find_rpicam_still() -> str | None:
+    return shutil.which("rpicam-still") or shutil.which("libcamera-still")
+
+
+def _probe_rpicam_still(settings: CaptureSettings, temp_dir: Path) -> str | None:
+    """Return executable path if rpicam-still can write a decodable JPEG (same stack as rpicam-hello)."""
+    exe = _find_rpicam_still()
+    if not exe:
+        return None
+    probe_path = temp_dir / "_probe_rpicam_still.jpg"
+    w, h = settings.image_width, settings.image_height
+    cmd = [
+        exe,
+        "-t",
+        "200",
+        "--nopreview",
+        "-o",
+        str(probe_path),
+        "--width",
+        str(w),
+        "--height",
+        str(h),
+    ]
+    try:
+        subprocess.run(cmd, check=True, timeout=45, capture_output=True, text=True)
+    except (
+        subprocess.CalledProcessError,
+        FileNotFoundError,
+        subprocess.TimeoutExpired,
+    ):
+        return None
+    if not probe_path.exists() or probe_path.stat().st_size < 200:
+        return None
+    img = cv2.imread(str(probe_path))
+    try:
+        probe_path.unlink()
+    except OSError:
+        pass
+    if img is None or getattr(img, "size", 0) == 0:
+        return None
+    return exe
+
+
 def _probe_first_nonempty_frame(cap: cv2.VideoCapture, attempts: int = 25) -> bool:
     for _ in range(attempts):
         ok, fr = cap.read()
@@ -105,6 +150,8 @@ class CaptureService:
         self._settings = settings
         self._temp_dir = Path(settings.temp_dir)
         self._temp_dir.mkdir(parents=True, exist_ok=True)
+        self._rpicam_mode = False
+        self._rpicam_exe: str | None = None
         # #region agent log
         index_order = _camera_index_candidates(settings.camera_index)
         _agent_debug_log(
@@ -169,47 +216,73 @@ class CaptureService:
             # endregion
 
         if self._camera is None:
-            raise RuntimeError(
-                "OpenCV could not capture frames (tried libcamera+V4L2 paths and indices "
-                f"{index_order}). If `rpicam-hello` works, install OpenCV with libcamera "
-                "support or use a libcamera-compatible OpenCV build; confirm no other "
-                "process holds the camera."
-            )
+            self._rpicam_exe = _probe_rpicam_still(settings, self._temp_dir)
+            if self._rpicam_exe:
+                self._rpicam_mode = True
+                # #region agent log
+                _agent_debug_log(
+                    "FIX",
+                    "capture.py:CaptureService.__init__:rpicam_fallback",
+                    "Using rpicam-still (pip OpenCV cannot access CSI camera)",
+                    {
+                        "executable": self._rpicam_exe,
+                        "reason": "opencv_failed_all_indices",
+                    },
+                )
+                _agent_debug_log(
+                    "H4",
+                    "capture.py:CaptureService.__init__:warmup_done",
+                    "rpicam-still probe OK",
+                    {"warmup_first_ok_nonempty": True},
+                )
+                # endregion
+            else:
+                raise RuntimeError(
+                    "OpenCV could not capture frames (tried libcamera+V4L2 paths and indices "
+                    f"{index_order}), and rpicam-still probe failed or is not installed. "
+                    "If `rpicam-hello` works, install `rpicam-apps` (`rpicam-still` on PATH) "
+                    "or an OpenCV build with libcamera support; confirm no other process "
+                    "holds the camera."
+                )
 
-        # #region agent log
-        try:
-            backend_name = self._camera.getBackendName()
-        except Exception:
-            backend_name = "unknown"
-        actual_w = self._camera.get(cv2.CAP_PROP_FRAME_WIDTH)
-        actual_h = self._camera.get(cv2.CAP_PROP_FRAME_HEIGHT)
-        _agent_debug_log(
-            "H1",
-            "capture.py:CaptureService.__init__:after_open",
-            "Capture opened",
-            {
-                "backend_name": backend_name,
-                "is_opened": self._camera.isOpened(),
-                "actual_w": actual_w,
-                "actual_h": actual_h,
-                **chosen,
-            },
-        )
-        _agent_debug_log(
-            "FIX",
-            "capture.py:CaptureService.__init__:backend_selected",
-            "Probe succeeded",
-            dict(chosen),
-        )
-        _agent_debug_log(
-            "H4",
-            "capture.py:CaptureService.__init__:warmup_done",
-            "Warmup skipped; probe already validated nonempty frames",
-            {"warmup_first_ok_nonempty": True},
-        )
-        # endregion
+        if self._camera is not None:
+            # #region agent log
+            try:
+                backend_name = self._camera.getBackendName()
+            except Exception:
+                backend_name = "unknown"
+            actual_w = self._camera.get(cv2.CAP_PROP_FRAME_WIDTH)
+            actual_h = self._camera.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            _agent_debug_log(
+                "H1",
+                "capture.py:CaptureService.__init__:after_open",
+                "Capture opened",
+                {
+                    "backend_name": backend_name,
+                    "is_opened": self._camera.isOpened(),
+                    "actual_w": actual_w,
+                    "actual_h": actual_h,
+                    **chosen,
+                },
+            )
+            _agent_debug_log(
+                "FIX",
+                "capture.py:CaptureService.__init__:backend_selected",
+                "Probe succeeded",
+                dict(chosen),
+            )
+            _agent_debug_log(
+                "H4",
+                "capture.py:CaptureService.__init__:warmup_done",
+                "Warmup skipped; probe already validated nonempty frames",
+                {"warmup_first_ok_nonempty": True},
+            )
+            # endregion
 
     def capture(self) -> Path:
+        if self._rpicam_mode and self._rpicam_exe:
+            return self._capture_rpicam_still()
+
         frame = None
         last_ok = False
         last_size = 0
@@ -253,6 +326,45 @@ class CaptureService:
         cv2.imwrite(str(image_path), frame)
         return image_path
 
+    def _capture_rpicam_still(self) -> Path:
+        assert self._rpicam_exe is not None
+        stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+        image_path = self._temp_dir / f"{stamp}.jpg"
+        w, h = self._settings.image_width, self._settings.image_height
+        cmd = [
+            self._rpicam_exe,
+            "-t",
+            "200",
+            "--nopreview",
+            "-o",
+            str(image_path),
+            "--width",
+            str(w),
+            "--height",
+            str(h),
+        ]
+        subprocess.run(cmd, check=True, timeout=45, capture_output=True, text=True)
+        img = cv2.imread(str(image_path))
+        if img is None or getattr(img, "size", 0) == 0:
+            # #region agent log
+            _agent_debug_log(
+                "H5",
+                "capture.py:CaptureService._capture_rpicam_still:failed",
+                "rpicam produced empty or unreadable JPEG",
+                {"path": str(image_path)},
+            )
+            # endregion
+            raise RuntimeError("rpicam-still did not produce a readable image.")
+        # #region agent log
+        _agent_debug_log(
+            "H2",
+            "capture.py:CaptureService.capture:ok",
+            "Frame captured (rpicam-still)",
+            {"attempts_used": 1, "shape": list(img.shape), "mode": "rpicam-still"},
+        )
+        # endregion
+        return image_path
+
     def cleanup_image(self, image_path: Path) -> None:
         if self._settings.keep_images_for_debug:
             return
@@ -260,4 +372,5 @@ class CaptureService:
             image_path.unlink()
 
     def close(self) -> None:
-        self._camera.release()
+        if self._camera is not None:
+            self._camera.release()
