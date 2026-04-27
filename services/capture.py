@@ -47,6 +47,23 @@ def _iter_capture_backends(camera_index: int):
         yield "CAP_LIBCAMERA", lambda: cv2.VideoCapture(camera_index, cv2.CAP_LIBCAMERA)
 
 
+def _camera_index_candidates(preferred: int) -> list[int]:
+    """Prefer config index, then every /dev/videoN number (Pi often exposes many nodes)."""
+    discovered: list[int] = []
+    for p in Path("/dev").glob("video*"):
+        tail = p.name.removeprefix("video")
+        if tail.isdigit():
+            discovered.append(int(tail))
+    discovered = sorted(set(discovered))
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for n in [preferred, *discovered, *range(8)]:
+        if n >= 0 and n not in seen:
+            seen.add(n)
+            ordered.append(n)
+    return ordered
+
+
 def _probe_first_nonempty_frame(cap: cv2.VideoCapture, attempts: int = 25) -> bool:
     for _ in range(attempts):
         ok, fr = cap.read()
@@ -66,22 +83,25 @@ class CaptureService:
         self._temp_dir = Path(settings.temp_dir)
         self._temp_dir.mkdir(parents=True, exist_ok=True)
         # #region agent log
+        index_order = _camera_index_candidates(settings.camera_index)
         _agent_debug_log(
             "H3",
             "capture.py:CaptureService.__init__:entry",
             "Opening camera",
             {
                 "camera_index": settings.camera_index,
+                "index_try_order": index_order,
                 "req_w": settings.image_width,
                 "req_h": settings.image_height,
                 "video_nodes": sorted(
                     str(p) for p in Path("/dev").glob("video*") if p.exists()
                 ),
+                "opencv_has_CAP_LIBCAMERA": hasattr(cv2, "CAP_LIBCAMERA"),
+                "opencv_has_CAP_V4L2": hasattr(cv2, "CAP_V4L2"),
             },
         )
         # endregion
 
-        idx = settings.camera_index
         res_chain: list[tuple[int, int]] = [
             (settings.image_width, settings.image_height),
         ]
@@ -90,31 +110,45 @@ class CaptureService:
 
         self._camera: cv2.VideoCapture | None = None
         chosen: dict[str, str | int | float] = {}
-        for backend_label, factory in _iter_capture_backends(idx):
-            for rw, rh in res_chain:
-                cap = factory()
-                if not cap.isOpened():
+        for idx in index_order:
+            for backend_label, factory in _iter_capture_backends(idx):
+                for rw, rh in res_chain:
+                    cap = factory()
+                    if not cap.isOpened():
+                        cap.release()
+                        continue
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, rw)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, rh)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    if _probe_first_nonempty_frame(cap):
+                        self._camera = cap
+                        chosen = {
+                            "device_index": idx,
+                            "backend_label": backend_label,
+                            "negotiated_w": rw,
+                            "negotiated_h": rh,
+                        }
+                        break
                     cap.release()
-                    continue
-                cap.set(cv2.CAP_PROP_FRAME_WIDTH, rw)
-                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, rh)
-                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                if _probe_first_nonempty_frame(cap):
-                    self._camera = cap
-                    chosen = {
-                        "backend_label": backend_label,
-                        "negotiated_w": rw,
-                        "negotiated_h": rh,
-                    }
+                if self._camera is not None:
                     break
-                cap.release()
             if self._camera is not None:
                 break
+            # #region agent log
+            _agent_debug_log(
+                "H3",
+                "capture.py:CaptureService.__init__:index_failed",
+                "No frame on this device index",
+                {"tried_index": idx},
+            )
+            # endregion
 
         if self._camera is None:
             raise RuntimeError(
-                f"No camera backend produced frames for index {idx}. "
-                "Try config.capture.camera_index=1, verify `libcamera-hello --list-cameras`, "
+                "No camera backend produced frames on any tried index "
+                f"{index_order}. "
+                "Confirm Arducam wiring, run `libcamera-hello --list-cameras`, "
+                "set config.capture.camera_index if you know the correct /dev/videoN, "
                 "and ensure no other process uses the camera."
             )
 
