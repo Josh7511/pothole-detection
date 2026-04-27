@@ -17,6 +17,18 @@ Edge pothole detection pipeline for Raspberry Pi 5 using Arducam + YOLO classifi
 ## Quick test run
 - `python main.py --config config.yaml --max-iterations 25 --log-level INFO`
 
+## Indoor / bench test
+Use `config.indoor.yaml` on a desk before mounting in a vehicle:
+- Keeps JPEGs under `capture.temp_dir` so you can verify the camera.
+- Writes detections to `data/indoor_test.db` instead of your main database.
+- Uses `gps.min_satellites: 3` for marginal indoor / window reception (still expect slow or no lock deep indoors).
+
+```bash
+python main.py --config config.indoor.yaml --max-iterations 40 --log-level INFO
+```
+
+If `gpsd` is not running, the process still runs (camera + inference); you will see `gps_fix=False` until the daemon is up. To skip GPS entirely for a camera-only check, set `gps.enabled` to `false` in the config you use.
+
 ## Evaluate logs
 - Save runtime output and parse summary metrics:
   - `python scripts/evaluate_log.py runtime.log`

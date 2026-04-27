@@ -1,0 +1,27 @@
+# Bench / indoor testing: keeps capture JPEGs, uses a throwaway DB, slightly relaxed GPS
+# thresholds for weak indoor or window-sill reception. For camera-only (no gpsd), set
+# gps.enabled to false.
+
+model_path: "models/yolov26n-cls.pt"
+capture:
+  camera_index: 0
+  interval_sec: 2.0
+  image_width: 1280
+  image_height: 720
+  temp_dir: "/tmp/pothole-captures"
+  keep_images_for_debug: true
+inference:
+  pothole_class_name: "pothole"
+  confidence_threshold: 0.5
+gps:
+  enabled: true
+  min_fix_mode: 2
+  min_satellites: 3
+database:
+  path: "data/indoor_test.db"
+  dedup_distance_m: 10.0
+alerts:
+  radius_m: 30.0
+  cooldown_sec: 15.0
+notifier:
+  mode: "console"

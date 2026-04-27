@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
@@ -23,8 +24,14 @@ class GpsService:
         self._settings = settings
         self._connected = False
         if settings.enabled:
-            gpsd.connect()
-            self._connected = True
+            try:
+                gpsd.connect()
+                self._connected = True
+            except Exception:
+                logging.warning(
+                    "GPS enabled but gpsd is unreachable; running without fixes. "
+                    "Start gpsd or set gps.enabled to false in config."
+                )
 
     def get_fix(self) -> GpsFix | None:
         if not self._connected:
