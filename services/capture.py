@@ -47,33 +47,29 @@ def _iter_capture_backends(camera_index: int):
         yield "CAP_LIBCAMERA", lambda: cv2.VideoCapture(camera_index, cv2.CAP_LIBCAMERA)
 
 
-def _camera_index_candidates(preferred: int) -> list[int]:
-    """Order indices for Pi CSI + libcamera layout.
+def _max_opencv_capture_index() -> int:
+    """OpenCV VideoCapture(i) uses a small enumerated device list, not /dev/videoN.
 
-    Typical Pi 5 `v4l2-ctl --list-devices`: rp1-cfe (CSI) exposes /dev/video0–7;
-    rpi-hevc-dec uses e.g. video19; pispbe uses video20+. OpenCV should usually
-    bind to the CSI node (0–7), not the decoder or ISP plumbing.
+    On Raspberry Pi builds, `nb_devices` is often 8 — only indices ``0..7`` are valid
+    even when the kernel exposes many more ``/dev/video*`` nodes (ISP, decoder, etc.).
     """
-    discovered: list[int] = []
-    for p in Path("/dev").glob("video*"):
-        tail = p.name.removeprefix("video")
-        if tail.isdigit():
-            discovered.append(int(tail))
-    discovered_set = sorted(set(discovered))
+    return 8
+
+
+def _camera_index_candidates(preferred: int) -> list[int]:
+    """Try config index first, then 0..max-1. Never use /dev/videoN as OpenCV index N."""
+    cap_max = _max_opencv_capture_index()
     seen: set[int] = set()
     ordered: list[int] = []
 
     def push(n: int) -> None:
-        if n >= 0 and n not in seen:
+        if 0 <= n < cap_max and n not in seen:
             seen.add(n)
             ordered.append(n)
 
-    push(preferred)
-    for n in range(8):
-        push(n)
-    for n in discovered_set:
-        push(n)
-    for n in range(8, 24):
+    if 0 <= preferred < cap_max:
+        push(preferred)
+    for n in range(cap_max):
         push(n)
     return ordered
 
@@ -105,6 +101,7 @@ class CaptureService:
             {
                 "camera_index": settings.camera_index,
                 "index_try_order": index_order,
+                "opencv_index_exclusive_max": _max_opencv_capture_index(),
                 "req_w": settings.image_width,
                 "req_h": settings.image_height,
                 "video_nodes": sorted(
@@ -159,10 +156,10 @@ class CaptureService:
 
         if self._camera is None:
             raise RuntimeError(
-                "No camera backend produced frames on any tried index "
-                f"{index_order}. "
-                "Confirm Arducam wiring, run `libcamera-hello --list-cameras`, "
-                "set config.capture.camera_index if you know the correct /dev/videoN, "
+                "No camera backend produced frames on any OpenCV index "
+                f"{index_order} (valid range is 0..{_max_opencv_capture_index() - 1}; "
+                "this is not the same as high-numbered /dev/video nodes). "
+                "Confirm Arducam wiring, try `rpicam-hello`, set capture.camera_index in config, "
                 "and ensure no other process uses the camera."
             )
 
