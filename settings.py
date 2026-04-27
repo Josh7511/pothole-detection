@@ -15,6 +15,8 @@ class CaptureSettings:
     image_height: int
     temp_dir: str
     keep_images_for_debug: bool
+    # If non-empty, copy each positive pothole frame JPEG here (not stored in SQLite).
+    positive_detections_dir: str = ""
 
 
 @dataclass
@@ -66,9 +68,12 @@ class AppSettings:
         with Path(config_path).open("r", encoding="utf-8") as handle:
             raw: dict[str, Any] = yaml.safe_load(handle)
 
+        cap_raw: dict[str, Any] = dict(raw["capture"])
+        cap_raw.setdefault("positive_detections_dir", "")
+
         return cls(
             model_path=raw["model_path"],
-            capture=CaptureSettings(**raw["capture"]),
+            capture=CaptureSettings(**cap_raw),
             inference=InferenceSettings(**raw["inference"]),
             gps=GpsSettings(**raw["gps"]),
             database=DatabaseSettings(**raw["database"]),

@@ -6,6 +6,7 @@ capture:
   image_height: 720
   temp_dir: "/tmp/pothole-captures"
   keep_images_for_debug: false
+  positive_detections_dir: "data/positive_detections"
 inference:
   pothole_class_name: "pothole"
   confidence_threshold: 0.5

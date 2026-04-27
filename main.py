@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import argparse
 import logging
+import shutil
 import time
 from dataclasses import dataclass
+from pathlib import Path
 
 from settings import AppSettings
 from services.capture import CaptureService
@@ -30,6 +32,15 @@ class RuntimeStats:
             f"saved={self.potholes_saved}, gps_fixes={self.gps_fixes_used}, "
             f"avg_inference_ms={avg_ms:.1f}, throughput_fpm={fpm:.1f}"
         )
+
+
+def _archive_positive_detection(image_path: Path, dest_dir: str) -> None:
+    root = dest_dir.strip()
+    if not root:
+        return
+    out = Path(root)
+    out.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(image_path, out / image_path.name)
 
 
 def run(config_path: str, max_iterations: int | None) -> None:
@@ -62,6 +73,18 @@ def run(config_path: str, max_iterations: int | None) -> None:
 
             if is_pothole:
                 stats.positive_frames += 1
+                if settings.capture.positive_detections_dir:
+                    try:
+                        _archive_positive_detection(
+                            image_path,
+                            settings.capture.positive_detections_dir,
+                        )
+                    except OSError as exc:
+                        logging.warning(
+                            "Could not copy positive image to %s: %s",
+                            settings.capture.positive_detections_dir,
+                            exc,
+                        )
                 if fix is not None:
                     stats.gps_fixes_used += 1
                     inserted = db.insert_pothole(

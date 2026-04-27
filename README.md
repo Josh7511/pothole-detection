@@ -43,4 +43,4 @@ On Raspberry Pi, the camera path **skips OpenCV’s V4L2 scan by default** and u
 
 ## Notes
 - New pothole inserts are deduplicated by distance threshold in config.
-- Images are deleted after inference unless debug retention is enabled.
+- Images are deleted from `capture.temp_dir` after each cycle unless `keep_images_for_debug` is true. Positive pothole frames are also copied to **`capture.positive_detections_dir`** when that path is set (JPEG files only; the database still stores coordinates and optional filename, not image bytes).
