@@ -39,12 +39,25 @@ def _agent_debug_log(
 # endregion
 
 
-def _iter_capture_backends(camera_index: int):
-    yield "default", lambda: cv2.VideoCapture(camera_index)
-    if hasattr(cv2, "CAP_V4L2"):
-        yield "CAP_V4L2", lambda: cv2.VideoCapture(camera_index, cv2.CAP_V4L2)
+def _iter_capture_attempts(device_num: int):
+    """Pi CSI: rpicam uses libcamera; OpenCV often needs CAP_LIBCAMERA and/or /dev/videoN paths.
+
+    V4L2-by-index alone frequently hits non-capture nodes (see kernel errors on Pi 5).
+    """
+    dev_path = f"/dev/video{device_num}"
+    # Prefer libcamera backend + explicit device path (matches rpicam stack).
     if hasattr(cv2, "CAP_LIBCAMERA"):
-        yield "CAP_LIBCAMERA", lambda: cv2.VideoCapture(camera_index, cv2.CAP_LIBCAMERA)
+        yield "CAP_LIBCAMERA+path", lambda p=dev_path: cv2.VideoCapture(
+            p, cv2.CAP_LIBCAMERA
+        )
+        yield "CAP_LIBCAMERA+index", lambda n=device_num: cv2.VideoCapture(
+            n, cv2.CAP_LIBCAMERA
+        )
+    yield "default+path", lambda p=dev_path: cv2.VideoCapture(p)
+    yield "default+index", lambda n=device_num: cv2.VideoCapture(n)
+    if hasattr(cv2, "CAP_V4L2"):
+        yield "V4L2+path", lambda p=dev_path: cv2.VideoCapture(p, cv2.CAP_V4L2)
+        yield "V4L2+index", lambda n=device_num: cv2.VideoCapture(n, cv2.CAP_V4L2)
 
 
 def _max_opencv_capture_index() -> int:
@@ -109,6 +122,7 @@ class CaptureService:
                 ),
                 "opencv_has_CAP_LIBCAMERA": hasattr(cv2, "CAP_LIBCAMERA"),
                 "opencv_has_CAP_V4L2": hasattr(cv2, "CAP_V4L2"),
+                "opencv_version": getattr(cv2, "__version__", "unknown"),
             },
         )
         # endregion
@@ -122,7 +136,7 @@ class CaptureService:
         self._camera: cv2.VideoCapture | None = None
         chosen: dict[str, str | int | float] = {}
         for idx in index_order:
-            for backend_label, factory in _iter_capture_backends(idx):
+            for attempt_label, factory in _iter_capture_attempts(idx):
                 for rw, rh in res_chain:
                     cap = factory()
                     if not cap.isOpened():
@@ -135,7 +149,7 @@ class CaptureService:
                         self._camera = cap
                         chosen = {
                             "device_index": idx,
-                            "backend_label": backend_label,
+                            "attempt_label": attempt_label,
                             "negotiated_w": rw,
                             "negotiated_h": rh,
                         }
@@ -156,11 +170,10 @@ class CaptureService:
 
         if self._camera is None:
             raise RuntimeError(
-                "No camera backend produced frames on any OpenCV index "
-                f"{index_order} (valid range is 0..{_max_opencv_capture_index() - 1}; "
-                "this is not the same as high-numbered /dev/video nodes). "
-                "Confirm Arducam wiring, try `rpicam-hello`, set capture.camera_index in config, "
-                "and ensure no other process uses the camera."
+                "OpenCV could not capture frames (tried libcamera+V4L2 paths and indices "
+                f"{index_order}). If `rpicam-hello` works, install OpenCV with libcamera "
+                "support or use a libcamera-compatible OpenCV build; confirm no other "
+                "process holds the camera."
             )
 
         # #region agent log
