@@ -90,13 +90,23 @@ def _camera_index_candidates(preferred: int) -> list[int]:
     return ordered
 
 
-def _skip_opencv_camera() -> bool:
-    """Set POTHOLE_SKIP_OPENCV_CAMERA=1 on Pi CSI when OpenCV probing leaves libcamera busy."""
-    return os.environ.get("POTHOLE_SKIP_OPENCV_CAMERA", "").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+def _opencv_skip_state() -> tuple[bool, str]:
+    """(skip OpenCV loop, reason). On Raspberry Pi, default skip — V4L2 probing leaves /dev/video* busy (log evidence)."""
+    env_try = os.environ.get("POTHOLE_TRY_OPENCV_CAMERA", "").strip().lower()
+    if env_try in ("1", "true", "yes"):
+        return False, "try_opencv_env"
+    env_skip = os.environ.get("POTHOLE_SKIP_OPENCV_CAMERA", "").strip().lower()
+    if env_skip in ("1", "true", "yes"):
+        return True, "skip_opencv_env"
+    try:
+        model = Path("/proc/device-tree/model").read_bytes().decode(
+            "ascii", errors="ignore"
+        )
+        if "raspberry pi" in model.lower():
+            return True, "default_raspberry_pi"
+    except OSError:
+        pass
+    return False, "default_non_pi"
 
 
 def _rpicam_stderr_retryable(stderr: str) -> bool:
@@ -148,15 +158,17 @@ def _probe_rpicam_still(
         return None, "minimal"
     probe_path = Path("/tmp/_pothole_probe_rpicam_still.jpg")
     w, h = settings.image_width, settings.image_height
+    # --zsl: Pi 5 ISP often fails with EBUSY on /dev/video4 without it (see libcamera stderr).
     attempts: list[tuple[str, list[str]]] = [
         (
             "minimal",
-            [exe, "-t", "200", "--nopreview", "-o", str(probe_path)],
+            [exe, "--zsl", "-t", "200", "--nopreview", "-o", str(probe_path)],
         ),
         (
             "explicit_wh",
             [
                 exe,
+                "--zsl",
                 "-t",
                 "200",
                 "--nopreview",
@@ -270,6 +282,7 @@ class CaptureService:
         self._rpicam_mode = False
         self._rpicam_exe: str | None = None
         self._rpicam_dim_style: str = "minimal"
+        skip_opencv, skip_opencv_reason = _opencv_skip_state()
         # #region agent log
         index_order = _camera_index_candidates(settings.camera_index)
         _agent_debug_log(
@@ -288,7 +301,8 @@ class CaptureService:
                 "opencv_has_CAP_LIBCAMERA": hasattr(cv2, "CAP_LIBCAMERA"),
                 "opencv_has_CAP_V4L2": hasattr(cv2, "CAP_V4L2"),
                 "opencv_version": getattr(cv2, "__version__", "unknown"),
-                "skip_opencv_camera": _skip_opencv_camera(),
+                "skip_opencv_camera": skip_opencv,
+                "skip_opencv_reason": skip_opencv_reason,
             },
         )
         # endregion
@@ -296,7 +310,7 @@ class CaptureService:
         self._camera: cv2.VideoCapture | None = None
         chosen: dict[str, str | int | float] = {}
 
-        if not _skip_opencv_camera():
+        if not skip_opencv:
             res_chain: list[tuple[int, int]] = [
                 (settings.image_width, settings.image_height),
             ]
@@ -338,16 +352,16 @@ class CaptureService:
         else:
             # #region agent log
             _agent_debug_log(
-                "H3",
+                "FIX",
                 "capture.py:CaptureService.__init__:skip_opencv",
-                "Skipping OpenCV (POTHOLE_SKIP_OPENCV_CAMERA); using rpicam-still only",
-                {},
+                "Skipping OpenCV camera scan",
+                {"reason": skip_opencv_reason},
             )
             # endregion
 
         if self._camera is None:
             # OpenCV probing can leave the CSI stack busy; wait before libcamera CLI.
-            if not _skip_opencv_camera():
+            if not skip_opencv:
                 time.sleep(3.0)
             self._rpicam_exe, self._rpicam_dim_style = _probe_rpicam_still(
                 settings, self._temp_dir
@@ -363,6 +377,7 @@ class CaptureService:
                         "executable": self._rpicam_exe,
                         "reason": "opencv_failed_all_indices",
                         "dim_style": self._rpicam_dim_style,
+                        "rpicam_zsl": True,
                     },
                 )
                 _agent_debug_log(
@@ -374,19 +389,20 @@ class CaptureService:
                 # endregion
             else:
                 hint = (
-                    "Set POTHOLE_SKIP_OPENCV_CAMERA=1 to skip V4L2 probing (often leaves camera busy on Pi 5). "
-                    "Close other camera apps and retry."
+                    "On Pi, OpenCV probing is skipped by default (see logs). "
+                    "Close other camera apps and retry. "
+                    "Set POTHOLE_TRY_OPENCV_CAMERA=1 only if you need the V4L2 scan."
                 )
                 raise RuntimeError(
-                    "OpenCV could not capture frames "
+                    "Could not capture frames "
                     + (
-                        f"(skipped; see env) "
-                        if _skip_opencv_camera()
-                        else f"(tried libcamera+V4L2 paths and indices {index_order}) "
+                        f"(OpenCV skipped: {skip_opencv_reason}) "
+                        if skip_opencv
+                        else f"(OpenCV tried indices {index_order}) "
                     )
-                    + "and rpicam-still probe failed after retries. "
+                    + "and rpicam-still (--zsl) probe failed after retries. "
                     + hint
-                    + " If `rpicam-hello` works, ensure `rpicam-still` is on PATH."
+                    + " Ensure `rpicam-still` works alone and nothing else uses the camera."
                 )
 
         if self._camera is not None:
@@ -475,7 +491,15 @@ class CaptureService:
         stamp = datetime.now(tz=timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
         image_path = self._temp_dir / f"{stamp}.jpg"
         w, h = self._settings.image_width, self._settings.image_height
-        cmd = [self._rpicam_exe, "-t", "200", "--nopreview", "-o", str(image_path)]
+        cmd = [
+            self._rpicam_exe,
+            "--zsl",
+            "-t",
+            "200",
+            "--nopreview",
+            "-o",
+            str(image_path),
+        ]
         if self._rpicam_dim_style == "explicit_wh":
             cmd.extend(["--width", str(w), "--height", str(h)])
         max_retries = 8

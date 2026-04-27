@@ -29,7 +29,7 @@ python main.py --config config.indoor.yaml --max-iterations 40 --log-level INFO
 
 If `gpsd` is not running, the process still runs (camera + inference); you will see `gps_fix=False` until the daemon is up. To skip GPS entirely for a camera-only check, set `gps.enabled` to `false` in the config you use.
 
-On Pi 5 + CSI + `rpicam-still` fallback, if you see **device busy** after OpenCV probing, run with **`POTHOLE_SKIP_OPENCV_CAMERA=1`** so startup goes straight to `rpicam-still` (example: `POTHOLE_SKIP_OPENCV_CAMERA=1 python main.py --config config.indoor.yaml --max-iterations 10`).
+On Raspberry Pi, the camera path **skips OpenCV’s V4L2 scan by default** and uses **`rpicam-still` with `--zsl`** so the ISP stack is not left busy (`/dev/video*` EBUSY). To force the old behavior (try OpenCV indices first), set **`POTHOLE_TRY_OPENCV_CAMERA=1`**. To force skipping OpenCV on non-Pi machines, use **`POTHOLE_SKIP_OPENCV_CAMERA=1`**.
 
 ## Evaluate logs
 - Save runtime output and parse summary metrics:
