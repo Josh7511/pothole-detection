@@ -92,10 +92,11 @@ class GpsService:
             extra = ""
             if is_refused:
                 extra = (
-                    "Connection refused means the gpsd *daemon* is not accepting TCP (nothing on port 2947). "
-                    "The GPS LED only shows the module has power; you still need: "
-                    "`sudo systemctl start gpsd` (or `sudo systemctl enable --now gpsd`), "
-                    "and `DEVICES=\"/dev/serial0\"` (or your UART) in `/etc/default/gpsd` on Pi OS, then `sudo systemctl restart gpsd`. "
+                    "Connection refused means nothing is listening on port 2947 (gpsd not running or not installed). "
+                    "If `systemctl` says `gpsd.service` does not exist, install: "
+                    "`sudo apt update && sudo apt install -y gpsd gpsd-clients`. "
+                    "Then set `DEVICES=\"/dev/serial0\"` (or your UART) in `/etc/default/gpsd`, "
+                    "and `sudo systemctl enable --now gpsd` (or `sudo systemctl restart gpsd`). "
                 )
             tail = (
                 "On the Pi, verify: `ss -lntp | grep 2947` (should show gpsd), and `cgps -s` with a sky view. "

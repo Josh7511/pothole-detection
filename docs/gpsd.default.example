@@ -1,0 +1,10 @@
+# Example for /etc/default/gpsd on Raspberry Pi OS (copy to /etc/default/gpsd
+# after `sudo apt install gpsd`, then: sudo systemctl restart gpsd)
+#
+# Use the stable symlink (recommended). On Pi 5, `ls -l /dev/serial0` often shows:
+#   /dev/serial0 -> ttyAMA10
+# If your GPS is on USB, use e.g. /dev/ttyUSB0 instead.
+
+DEVICES="/dev/serial0"
+GPSD_OPTIONS="-n"
+USBAUTO="false"
